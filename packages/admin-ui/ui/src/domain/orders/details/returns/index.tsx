@@ -1,16 +1,19 @@
 import {
+  AdminGetVariantsVariantInventoryRes,
   AdminPostOrdersOrderReturnsReq,
+  InventoryLevelDTO,
   LineItem as RawLineItem,
   Order,
   StockLocationDTO,
 } from "@medusajs/medusa"
-import { useAdminStockLocations } from "medusa-react"
+import { useAdminStockLocations, useMedusa } from "medusa-react"
 import { useAdminRequestReturn, useAdminShippingOptions } from "medusa-react"
 import React, { useContext, useEffect, useState } from "react"
 import Spinner from "../../../../components/atoms/spinner"
 import Button from "../../../../components/fundamentals/button"
 import CheckIcon from "../../../../components/fundamentals/icons/check-icon"
 import EditIcon from "../../../../components/fundamentals/icons/edit-icon"
+import WarningCircleIcon from "../../../../components/fundamentals/icons/warning-circle"
 import IconTooltip from "../../../../components/molecules/icon-tooltip"
 import Modal from "../../../../components/molecules/modal"
 import LayeredModal, {
@@ -37,6 +40,7 @@ type ReturnMenuProps = {
 type LineItem = Omit<RawLineItem, "beforeInsert">
 
 const ReturnMenu: React.FC<ReturnMenuProps> = ({ order, onDismiss }) => {
+  const { client } = useMedusa()
   const layeredModalContext = useContext(LayeredModalContext)
   const { isFeatureEnabled } = useFeatureFlag()
   const isLocationFulfillmentEnabled =
@@ -84,6 +88,43 @@ const ReturnMenu: React.FC<ReturnMenuProps> = ({ order, onDismiss }) => {
       setAllItems(getAllReturnableItems(order, false))
     }
   }, [order])
+
+  const itemMap = React.useMemo(() => {
+    return new Map<string, LineItem>(order.items.map((i) => [i.id, i]))
+  }, [order.items])
+
+  const [inventoryMap, setInventoryMap] = useState<
+    Map<string, InventoryLevelDTO[]>
+  >(new Map())
+
+  React.useEffect(() => {
+    const getInventoryMap = async () => {
+      if (!allItems.length || !isLocationFulfillmentEnabled) {
+        return new Map()
+      }
+      const itemInventoryList = await Promise.all(
+        allItems.map(async (item) => {
+          if (!item.variant_id) {
+            return undefined
+          }
+          return await client.admin.variants.getInventory(item.variant_id)
+        })
+      )
+
+      return new Map(
+        itemInventoryList
+          .filter((it) => !!it)
+          .map((item) => {
+            const { variant } = item as AdminGetVariantsVariantInventoryRes
+            return [variant.id, variant.inventory[0].location_levels]
+          })
+      )
+    }
+
+    getInventoryMap().then((map) => {
+      setInventoryMap(map)
+    })
+  }, [allItems, client.admin.variants, isLocationFulfillmentEnabled])
 
   const { isLoading: shippingLoading, shipping_options: shippingOptions } =
     useAdminShippingOptions({
@@ -188,6 +229,26 @@ const ReturnMenu: React.FC<ReturnMenuProps> = ({ order, onDismiss }) => {
     }
   }
 
+  const locationsHasInventoryLevels = React.useMemo(() => {
+    return Object.entries(toReturn)
+      .map(([itemId]) => {
+        const item = itemMap.get(itemId)
+        if (!item?.variant_id) {
+          return true
+        }
+        const hasInventoryLevel = inventoryMap
+          .get(item.variant_id)
+          ?.find((l) => l.location_id === selectedLocation?.value)
+
+        if (!hasInventoryLevel && selectedLocation?.value) {
+          return false
+        }
+        return true
+      })
+      .every(Boolean)
+  }, [toReturn, itemMap, selectedLocation?.value, inventoryMap])
+
+  console.log(locationsHasInventoryLevels)
   return (
     <LayeredModal context={layeredModalContext} handleClose={onDismiss}>
       <Modal.Body>
@@ -224,6 +285,16 @@ const ReturnMenu: React.FC<ReturnMenuProps> = ({ order, onDismiss }) => {
                   })) || []
                 }
               />
+              {!locationsHasInventoryLevels && (
+                <div className="bg-orange-10 border-orange-20 rounded-rounded text-yellow-60 gap-x-base mt-4 flex border p-4">
+                  <div className="text-orange-40">
+                    <WarningCircleIcon size={20} fillType="solid" />
+                  </div>
+                  <div>
+                    {`The selected location does not have inventory levels for the selected items. The return can be requested but can't be received until an inventory level is created for the selected location.`}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
